@@ -1,0 +1,138 @@
+---
+title: "Synchronized Two-Player Animations in Roblox"
+date: "2025-12-08"
+description: "How I built a system for cinematic grab attacks where two characters play perfectly synced animations."
+tags: ["yokai-trials", "roblox", "combat", "animation"]
+---
+
+We had this vision for finisher attacks. Not just big damage numbers, but actual cutscene moments. The camera pulls in, both characters lock into a choreographed sequence, VFX everywhere, a big sound hit, then the victim gets launched. The kind of thing you see in anime fighters that makes you go "oh that was sick." We're using it for some specific abilities right now, but the endgame is full cinematic finishers with animated cameras and the whole treatment.
+
+The problem was that Roblox has no built-in way to synchronize animations across two separate character rigs. You can play an animation on one character and a different animation on another, but getting them to be in the exact same place, at the exact same time, playing complementary animations frame-by-frame? That's a fight against every default system in the engine.
+
+I started building it and immediately ran into everything at once.
+
+The first issue was positioning. I'd tell the server to put both characters at the same CFrame. I'd check the server, and the positions looked correct. Then I'd check the clients, and they were somewhere completely different. Not slightly off. Genuinely far apart. The server said they were aligned. The clients disagreed.
+
+I tried waiting a frame then setting the position. Still wrong. I tried tweening them together. Still buggy. I tried direct CFrame assignment. The characters would snap to the right position for a single frame, then drift away. The root cause was a combination of everything: network ownership was fighting me, physics was applying forces I hadn't accounted for, and the character controller was reasserting movement every frame.
+
+The fix wasn't to try harder at positioning. It was to take complete control. Strip everything.
+
+First, destroy any physics forces on both characters. BodyVelocity, BodyForce, VectorForce, all of it. Zero out all velocity:
+
+```lua
+for _, obj in pairs(victimRig:GetDescendants()) do
+    if obj:IsA("BodyVelocity")
+        or obj:IsA("BodyForce")
+        or obj:IsA("VectorForce") then
+        obj:Destroy()
+    end
+end
+
+attackerHRP.AssemblyLinearVelocity = Vector3.zero
+attackerHRP.AssemblyAngularVelocity = Vector3.zero
+victimHRP.AssemblyLinearVelocity = Vector3.zero
+victimHRP.AssemblyAngularVelocity = Vector3.zero
+```
+
+Then anchor both HumanoidRootParts *before* setting the position. This order matters. I spent days on a phantom drift bug before realizing that if you set the CFrame before anchoring, physics can sneak in a single frame of movement between the assignment and the anchor. Anchor first, then position:
+
+```lua
+attackerHRP.Anchored = true
+victimHRP.Anchored = true
+
+TweenService:Create(attackerHRP, TweenInfo.new(0.1),
+    {CFrame = _G.lastPositions[tostring(AttackerPlr.UserId)]}
+):Play()
+TweenService:Create(victimHRP, TweenInfo.new(0.1),
+    {CFrame = _G.lastPositions[tostring(AttackerPlr.UserId)]}
+):Play()
+```
+
+Both characters tween to the attacker's BetterReplication position. Not Roblox's position, the custom replicated one. Because it's more accurate.
+
+Both characters get moved into a shared collision group so they phase through each other during the sequence. Every playing animation on both characters gets stopped instantly, zero fade time, so nothing interferes with the synced animations:
+
+```lua
+setCollisionGroup(attackerRig, "2Rig")
+setCollisionGroup(victimRig, "2Rig")
+
+for _, track in pairs(attackerHumanoid.Animator
+    :GetPlayingAnimationTracks()) do
+    track:Stop(0)
+end
+
+for _, track in pairs(victimHumanoid.Animator
+    :GetPlayingAnimationTracks()) do
+    track:Stop(0)
+end
+```
+
+Then both synced animations play simultaneously with zero fade and full weight:
+
+```lua
+attackerTrack:Play(0, 1)
+victimTrack:Play(0, 1)
+```
+
+But the server doing all this isn't enough. The client's character controller is aggressive. It wants to reassert movement. The Animate script wants to play idle animations. Even with the HRP anchored on the server, the client can fight against it. So the server fires a signal to both clients telling them to lock down:
+
+```lua
+preloadBridge:Fire(
+    Players:GetPlayerFromCharacter(attackerChar),
+    {true, _G.lastPositions[tostring(AttackerPlr.UserId)],
+     victimRig, missAnimID}
+)
+```
+
+The client-side `TwoRigClient` receives this and goes into full lockdown. It sets `TwoRigActive` on the character (which tells the Animate script to pause), zeros WalkSpeed and JumpPower, tweens to the target position, and then hooks into `RenderStepped` to enforce the position *every single frame*:
+
+```lua
+syncConnection = RunService.RenderStepped
+    :Connect(function(deltaTime)
+        if hrp.Anchored then
+            hrp.CFrame = targetCFrame
+        end
+
+        if animator then
+            for _, track in pairs(
+                animator:GetPlayingAnimationTracks()) do
+                if track.Priority
+                    ~= Enum.AnimationPriority.Action
+                    and track.Priority
+                    ~= Enum.AnimationPriority.Action4 then
+                    track:Stop(0)
+                end
+            end
+        end
+    end)
+```
+
+Every frame: force the position back. Every frame: kill any animation that isn't the synced one. This is brute force, but it's the only thing that worked reliably. Anything less and Roblox's systems would sneak in a frame of drift or a flash of idle animation.
+
+When the victim's animation finishes, the cleanup sequence fires. Unanchor both characters, return network ownership to the players, tell the clients to stop enforcing position, restore collision groups, then ragdoll the victim with the configured velocity:
+
+```lua
+victimTrack.Stopped:Once(function()
+    module:releaseSync(attackerChar, victimChar)
+
+    while (torso.Position - hrp.Position).Magnitude > limit do
+        task.wait()
+    end
+
+    ragdollNPC:Ragdoll(true, victimChar, attackerChar,
+        twoRigConfig.Velocity,
+        twoRigConfig.RagdollDuration, nil, 0.55)
+
+    if onComplete then
+        task.spawn(function()
+            onComplete(attackerChar, victimChar)
+        end)
+    end
+end)
+```
+
+The `onComplete` callback is how the combat system defers damage. The hit doesn't register until the animation actually completes. If a third player interrupts the sequence, no damage applies. The animation was the promise, and the callback is the delivery.
+
+Building this system was a fight against Roblox at every level. Physics wants to move things. The character controller wants to assert movement. The Animate script wants to play idles. You have to suppress all of them, on both server and client, for the duration of the sequence. The solution wasn't one clever trick. It was tightening down on position verification at every layer until there was nowhere left for the engine to sneak in unwanted behavior.
+
+The "anchor before position" ordering fix took days to find. One line of code, in the wrong order, causing characters to drift for a single frame before locking in place. That's the kind of bug that makes you question everything about how you think physics works. But once it was fixed, the whole system came together. Two characters, perfectly synced, playing a choreographed sequence that looks like it was animated as one piece. That's the moment it stopped being a combat system and started being a fighting game.

@@ -1,0 +1,93 @@
+---
+title: "Building the M1 Combat System"
+date: "2025-06-10"
+description: "Getting basic punch combat to feel right in Roblox, and the client/server sync problems that came with it."
+tags: ["yokai-trials", "roblox", "combat", "networking"]
+---
+
+There was a six-month gap between starting Yokai Trials and actually building combat. Life got in the way. We'd been working on maps, UI, the gacha system, and a basic prototype that technically had punches but felt like swinging a pool noodle at nothing. June 2025 was when the real combat system started.
+
+The first version felt terrible. I was testing solo, throwing punches at a dummy, and every hit felt wrong. The animations were stiff, the timing was off, and there was this noticeable delay between clicking and anything happening on screen. It didn't feel like a fighting game. It felt like filling out a form and waiting for a response.
+
+The root of the problem was the server. Every attack had to go through the server for validation, and the round trip took too long. I'd click, the client would send the request, the server would process it, send back a response, and only then would the client know if the attack was valid. By the time I got the answer, the moment was gone. I couldn't even decide whether to cancel an animation because the server hadn't told me what was happening yet.
+
+So I started predicting. The client wouldn't wait for the server anymore. It would play the animation immediately, advance the combo count locally, and trust that the server would probably agree:
+
+```lua
+function M1Combat:Attack()
+    if not self:SanityChecks() then return end
+
+    ctx.fightingData.isAttacking = true
+    self:NextStep()
+    step = ctx.comboStep
+    ctx.animTable = ctx.animationIds[step]
+
+    local animTrack = ctx.preloadedAnimations[ctx.animTable.Animation]
+    ctx.AnimationBlending.playWithBlend(ctx.character, animTrack)
+
+    ctx.SFXModule.M1:Swing(ctx.animationIds.Name, step)
+    self:PopulateTimers()
+
+    -- Now wait for server confirmation
+    local result, currentCombo = ctx.CombatService:SendM1Attack():await()
+end
+```
+
+The game felt instantly better. Punches were snappy. But prediction introduced a new problem: the client and server would disagree about which combo step you were on. The client says you're on punch 3. The server says you're on punch 2. Now what?
+
+The obvious answer is to snap the client back to the server's state. But that means stopping the current animation mid-swing and jumping to a different one. In practice, that looks terrible. Your character glitches, the combo feels broken, and it pulls you completely out of the fight.
+
+So instead of fighting the desync, I built around it. When the server disagrees with the client, the system doesn't hard-stop anything. It blends the incorrect animation into the correct one, as if the transition was supposed to happen. The player never sees a glitch because the correction looks intentional:
+
+```lua
+if ctx.comboStep ~= step then
+    warn("Client Desynced")
+    if currentCombo then
+        ctx.comboStep = currentCombo
+    end
+end
+```
+
+The client quietly corrects its state and the animation blending makes the transition smooth. I added a `_G.SyncError` counter during development to track how often the desync actually happened. It was more often than I expected, but because the blending handled it gracefully, you couldn't feel it during gameplay.
+
+The combo system itself uses a deadline/snapshot pattern to prevent stale resets. Each attack sets a `comboDeadline` with a snapshot of the current step. When the deadline expires, it only resets the combo if the snapshot still matches the current state:
+
+```lua
+function M1Combat:OnComboExpire()
+    if ctx.comboDeadline
+        and ctx.comboDeadline.snapshot == newInfo then
+        ctx.comboStep = nil
+    end
+    ctx.comboDeadline = nil
+    ctx.comboExpireSignal:Fire()
+end
+```
+
+Without this, you'd get situations where a combo reset from punch 2 would fire while you were already on punch 4, killing your chain for no reason.
+
+But a system that purely relied on timing started showing its cracks. I found that if you timed a punch *perfectly*, you could land it right in the gap where the client's comboDeadline had expired but the server's hadn't. The client thought the combo was reset, so it started a new one at step 1. The server thought the combo was still going, so it expected step 4. That mismatch was just poor system design on my end. The fix was the same reconciliation that handled prediction desyncs. The `ctx.comboStep ~= step` check silently corrected the client whenever the server disagreed, regardless of *why* they disagreed. I tightened down on the timing windows so the edge case rarely triggered in the first place, and the correction handled the rest. That was the end of that.
+
+The whole system runs through sanity checks before every attack. Dead? Stunned? Already attacking? Blocking? Combo past the limit? All checked before a single frame of animation plays:
+
+```lua
+function M1Combat:SanityChecks()
+    ctx:RealignAnimations()
+
+    if ctx.attackDebounce > ctx.now() then return false end
+    if not ctx.character
+        or not ctx.character:FindFirstChild("HumanoidRootPart")
+        or ctx.humanoid.Health < 1 then return false end
+    if not ctx.fightingData.CombatEnabled
+        or ctx.stunned
+        or ctx.fightingData.isAttacking then return false end
+    if ctx.blockState then return false end
+
+    if ctx.comboStep and type(ctx.comboStep) == "number" then
+        if ctx.comboStep > 4 then return false end
+    end
+
+    return true
+end
+```
+
+The M1 system ended up being the foundation that everything else was built on. Abilities, blocking, aerial combat, they all follow the same pattern: predict on the client, validate on the server, blend through disagreements. But getting that pattern right took weeks of solo testing, watching animations stutter, and slowly accepting that perfect sync wasn't the goal. Feeling right was.

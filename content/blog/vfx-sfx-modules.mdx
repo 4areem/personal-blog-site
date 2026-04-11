@@ -1,0 +1,146 @@
+---
+title: "Making Attacks Feel Real: VFX and SFX"
+date: "2025-09-12"
+description: "How I synced visual effects and sound to animation timing, and the system I built to make it work across server and client."
+tags: ["yokai-trials", "roblox", "vfx", "game-dev"]
+---
+
+Abilities were working. Hitboxes connected. Damage applied. But it didn't *feel* like anything. You'd press E, Mantis would throw a Jet Punch, the opponent's health would drop, and it all happened in silence with no visual feedback. Technically correct. Emotionally dead. A fighting game without effects is just math happening on screen.
+
+I jumped the gun a little. I assumed that animation keyframe marker data didn't replicate between server and client. I'm still not 100% sure whether that's true, but I didn't wait to find out. I built a system to extract the timing data myself, and honestly it turned out better than relying on Roblox's pipeline would have anyway.
+
+The system is called `AnimationEventService`. It uses `KeyframeSequenceProvider` to download the raw keyframe data from any animation, then walks through every keyframe looking for markers. Animators embed markers at specific timestamps in their animations: "spawn the slash VFX here," "play the impact sound here," "emit particles here." My module extracts all of those, sorts them by time, and caches the result:
+
+```lua
+function module:collectMarkers(anim)
+    local success, seq = pcall(
+        KSP.GetKeyframeSequenceAsync, KSP, contentId)
+
+    local list = {}
+    local byName = {}
+    local maxTime = 0
+
+    for _, keyframe in ipairs(seq:GetKeyframes()) do
+        local t = keyframe.Time or 0
+        if t > maxTime then maxTime = t end
+
+        for _, child in ipairs(keyframe:GetChildren()) do
+            if child.ClassName == "KeyframeMarker" then
+                table.insert(list, {
+                    name = child.Name,
+                    time = t,
+                    value = child.Value
+                })
+                byName[child.Name] = byName[child.Name] or {}
+                table.insert(byName[child.Name], {
+                    time = t, value = child.Value
+                })
+            end
+        end
+    end
+
+    table.sort(list, function(a,b) return a.time < b.time end)
+
+    return { list = list, byName = byName, duration = maxTime }
+end
+```
+
+The result is a table of every effect that should happen during an animation, with the exact timestamp for each one. Now I needed something to actually fire them at the right time.
+
+That's the `Emit` function. When an attack launches, `Emit` receives the player, the ability class name, and the timing table from `collectMarkers`. It spawns a task that loops through every marker and `task.delay`s each effect to fire at exactly the right moment:
+
+```lua
+function module:Emit(player, class, tbl, signal)
+    if blacklistedFromClass(class) then return false end
+
+    task.spawn(function()
+        local lag = not isClient
+            and math.clamp(player:GetNetworkPing(), 0.025, 0.2)
+            or math.clamp(player:GetNetworkPing() * 2, 0.025, 0.2)
+
+        if module[class] and module[class].OnStart then
+            module[class].OnStart(player, signal)
+        end
+
+        if module[class] and module[class].OnImpact then
+            module[class].OnImpact(player, signal)
+        end
+
+        local maxDelay = 0
+
+        for _, v in pairs(tbl.list) do
+            if tonumber(v.value) then
+                if blacklistedFromFX(v, class) then continue end
+
+                if module[class] and module[class][v.name] then
+                    local delayTime = v.time - lag
+                        + (offsets and offsets[v.name] or 0)
+                    maxDelay = math.max(maxDelay, delayTime)
+
+                    task.delay(delayTime, function()
+                        module[class][v.name](player, signal)
+                    end)
+                end
+            end
+        end
+
+        if module[class] and module[class].OnEnd then
+            task.delay(tbl.duration, function()
+                module[class].OnEnd(player)
+            end)
+        end
+    end)
+end
+```
+
+Each marker in the list maps to a named function in the VFX module. If the animation has a marker called "Slash" at 0.3 seconds and another called "Highlight" at 0.1 seconds, `Emit` schedules `module.SonicSlashes.Slash` at 0.3s and `module.SonicSlashes.Highlight` at 0.1s. The effects fire in sync with the animation because they're timed from the same source data.
+
+The ping compensation is subtle but important. The `lag` variable subtracts the player's network delay from each timer, so effects on the server fire slightly earlier to stay in sync with what the client sees. On the client side, it doubles the ping estimate to account for the round trip.
+
+The tricky part was the client/server split. VFX is inherently client-side. When I play a particle effect on my client, nobody else sees it. So the attacker's client runs its own VFX immediately when the attack starts. But what about everyone else in the game? They need to see the effects too.
+
+The solution: the server broadcasts to every client within range to run the VFX on the attacker's character. A `SERVER_VFX` whitelist controls which effects the server handles versus which ones are client-only:
+
+```lua
+local SERVER_VFX = {
+    SonicSlashes = {
+        Slash = true,
+        OnImpact = true
+    },
+}
+```
+
+The `blacklistedFromFX` function flips logic depending on which side is running. On the client, if an effect is in `SERVER_VFX`, the client skips it (the server handles broadcasting). On the server, if an effect is *not* in `SERVER_VFX`, the server skips it (it's client-only). Same function, different behavior depending on context.
+
+For effects that spawn frequently, like beam slashes or ground impacts, I built an object pool. Pre-warm a set of instances at startup, hide them at y=-1000 with particles disabled, and check them out when needed:
+
+```lua
+for i = 1, config.size do
+    local clone = sourcePart:Clone()
+    clone.Name = partName .. "_pool_" .. i
+
+    if clone:IsA("BasePart") then
+        clone.CFrame = CFrame.new(0, -1000, 0)
+    end
+
+    for _, descendant in clone:GetDescendants() do
+        if descendant:IsA("ParticleEmitter")
+            or descendant:IsA("Beam")
+            or descendant:IsA("Trail") then
+            descendant.Enabled = false
+        end
+    end
+
+    table.insert(VFX_POOLS[className][partName], {
+        part = clone, inUse = false
+    })
+end
+```
+
+When an effect needs a beam slash, it grabs one from the pool, positions it, enables the particles, and returns it when done. No cloning, no garbage collection stutters. If the pool runs out, it clones a new one as a fallback but warns about it so I know to increase the pool size.
+
+The SFX module mirrors the entire VFX architecture. Same `Emit` pattern, same timing extraction, same server/client split. The only difference is it plays sounds instead of spawning particles.
+
+Each ability has lifecycle hooks: `OnStart` fires immediately when the attack begins, `OnImpact` connects to the hit signal and triggers on contact, `OnEnd` fires when the animation duration expires. The per-marker effects fill in everything between.
+
+The moment I got Mantis's Jet Punch working with the full VFX and SFX pipeline, the game felt different. Not just better. *Different*. The punch connected, the slash effect tore across the screen, the impact sound hit, the opponent's character reacted. It went from a prototype to something that felt like a real game in an afternoon. That was the moment I knew the combat system was going to work.

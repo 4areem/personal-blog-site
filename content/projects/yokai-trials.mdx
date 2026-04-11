@@ -1,0 +1,19 @@
+---
+name: "Yokai Trials"
+description: "A DanDaDan-inspired PvP game on Roblox. Gacha-based characters, unique movesets, infusions, and parry-driven combat."
+tech: ["Roblox-Studio", "Luau"]
+url: "https://www.roblox.com/games/131530689203880/YOKAI-TRIALS"
+main: true
+---
+
+## Why I Built This
+
+Most Roblox fighting games try to do too much. Open worlds, quest systems, progression treadmills. I wanted something focused: you spin for a character, you get a moveset, you fight. The DanDaDan anime had the perfect aesthetic for it, and nobody had made a clean PvP game in that style yet.
+
+## How I Built This
+
+The game runs on a Knit service framework with BridgeNet2 handling all networking. The combat system is split into modular client-side modules (M1Combat, Abilities, Blocking, Dash, AerialCombat) that all share a single CombatContext object.
+
+The biggest technical investment was a custom replication system (BetterReplication) that sends positional data at 20Hz via binary buffers, giving the hitbox system roughly 30% more accurate position data than Roblox's default replication. This was critical for making melee combat feel responsive in a networked environment.
+
+The gacha system ties into the combat through ClassAnimations. Each character is a collection of animation IDs and ability definitions. Swapping characters just swaps the animation table, and the combat system handles the rest.

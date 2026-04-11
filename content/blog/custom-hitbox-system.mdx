@@ -1,0 +1,126 @@
+---
+title: "30% Faster Hitboxes with Custom Replication"
+date: "2025-11-12"
+description: "How I built a hitbox system on top of custom replication that detects players more accurately than Roblox's default."
+tags: ["yokai-trials", "roblox", "networking", "hitbox"]
+---
+
+By November, BetterReplication had been running for months. It was doing its job: sending position data at 20Hz, keeping clients in sync, making combat feel responsive. But I was only using it for one thing. The `_G.lastPositions` table had the most accurate position data in the entire game, updated and validated every 50 milliseconds, and my hitbox system was still reading from Roblox's default `HumanoidRootPart.Position`. I had a faster data source sitting right there and wasn't using it.
+
+The reason I hadn't switched was the anti-cheat. BetterReplication accepts whatever position the client sends. A speed hacker could claim to be anywhere. Before I could trust that data for hit detection, I needed to know it was clean. That's why I'd built the SanityChecker months earlier, but I hadn't thought of it as enabling anything beyond basic replication. It was a defensive measure. It took me a while to realize it was also the key to better hitboxes.
+
+The SanityChecker validates every incoming position packet. It compares the client's claimed position against Roblox's own replication, checks the velocity against what's physically possible, and scales the tolerance based on ping and movement speed:
+
+```lua
+function Config.isDeviationValid(deviation, velocity, ping)
+    if velocity < 1 then
+        return deviation <= 1, 1
+    end
+
+    local baseAllowedDeviation = Config.getAllowedDeviation(ping)
+    local velocityMultiplier = Config.getVelocityMultiplier(velocity)
+    local finalAllowedDeviation =
+        baseAllowedDeviation * velocityMultiplier
+
+    return deviation <= finalAllowedDeviation, finalAllowedDeviation
+end
+```
+
+Standing still? Maximum 1 stud of deviation. Walking? Stricter tolerance. Sprinting? More room. Using a dash ability? Even more. The system adapts to what the player is actually doing:
+
+```lua
+Config.velocityBuckets = {
+    {min = 0, max = 20, deviationMultiplier = 0.85},
+    {min = 20, max = 50, deviationMultiplier = 1.0},
+    {min = 50, max = 100, deviationMultiplier = 1.2},
+    {min = 100, max = math.huge, deviationMultiplier = 1.5},
+}
+```
+
+Any packet that fails validation gets rejected, and the system falls back to Roblox's position for that player. No kicks, no disconnects. Just graceful degradation. The `_G.lastPositions` table only ever contains verified data.
+
+Once I trusted the data, the hitbox switch was straightforward. The `getRoot()` function in the HitboxManager checks for BetterReplication data first, verifies it against the anti-cheat, and falls back to Roblox's default if anything is off:
+
+```lua
+local function getRoot(player: Player)
+    local uid = tostring(player.UserId)
+
+    local TEMP = game.Workspace:FindFirstChild("Temp")
+    local plrTable = TEMP:FindFirstChild(uid)
+    if not plrTable then
+        return player.Character.HumanoidRootPart
+    end
+
+    local replicatedRoot = plrTable:FindFirstChild("Root")
+    if replicatedRoot then
+        if _G.lastPositions["UNVERIFIED"][uid]
+            == _G.lastPositions[uid] then
+            return replicatedRoot
+        else
+            return player.Character.HumanoidRootPart
+        end
+    end
+    return player.Character.HumanoidRootPart
+end
+```
+
+The `UNVERIFIED` check is the anti-cheat gate. `_G.lastPositions["UNVERIFIED"]` stores every incoming packet before validation. `_G.lastPositions` stores only verified ones. If they match, the data is clean and the hitbox uses the custom replicated position. If they don't match, something triggered the anti-cheat, and the system falls back silently.
+
+The `Root` hitbox method builds on this with velocity smoothing and ping-based prediction. It tracks the player's movement between frames, smooths out jitter, detects dashes, and projects the hitbox forward based on the player's actual network ping:
+
+```lua
+Root = {
+    update = function(debugPart, root, player,
+            forwardOffset, dt, state, oldPos)
+        local currentPos = root.Position
+        local vel = (currentPos - oldPos) / dt
+
+        local ping = math.min(player:GetNetworkPing(), 0.3)
+        local acceleration =
+            (vel - state.lastVelocity).Magnitude / dt
+        local isDashing = acceleration > 20
+        local dynamicSmoothing =
+            isDashing and 0.75 or state.smoothingFactor
+        local predictionMultiplier =
+            isDashing and 3 or 1.0
+
+        state.smoothedVelocity =
+            state.smoothedVelocity:Lerp(vel, dynamicSmoothing)
+        if state.smoothedVelocity.Magnitude
+            > state.maxVelocity then
+            state.smoothedVelocity =
+                state.smoothedVelocity.Unit * state.maxVelocity
+        end
+
+        local futurePos = currentPos
+            + (state.smoothedVelocity
+                * ping * predictionMultiplier)
+        debugPart.CFrame = CFrame.new(futurePos,
+            futurePos + root.CFrame.LookVector)
+            * CFrame.new(0, 0, -forwardOffset)
+
+        state.lastVelocity = vel
+    end
+}
+```
+
+During normal movement, the smoothing factor is 0.2 and the prediction multiplier is 1x. During a dash (acceleration above 20), smoothing jumps to 0.75 and prediction triples. This is because dashing players move in short, fast bursts. Without the aggressive prediction, the hitbox would lag behind the character during dashes and miss.
+
+I wrote a benchmark script to measure the actual difference. It ran for 10 seconds, collected 1,197 samples, and compared how far each replication system's position was from the player's true local position:
+
+```
+Replication Benchmark (last 10s, 1197 samples)
+-------------------------------------------------------
+Avg distance (Green vs Blue):   2.472 studs
+Max distance (Green vs Blue):   6.677 studs
+Avg distance (Local vs Blue):   5.373 studs  [Custom]
+Avg distance (Local vs Green):  7.585 studs  [Default]
+-------------------------------------------------------
+Custom replication is 29.2% closer (29.2% improvement)
+```
+
+Green is Roblox's default replication. Blue is the custom system. On average, Roblox's positions were 7.585 studs off from where the player actually was. The custom system was 5.373 studs off. That's a 29.2% improvement in positional accuracy. And the max deviation between the two systems hit 6.677 studs, which in a melee game where your hitbox is maybe 4-5 studs wide, is the entire difference between a hit and a miss.
+
+The numbers confirmed what I'd already been feeling during testing: combat was tighter. But seeing it quantified made it real. Nearly 30% closer to where the player actually is, across 1,197 samples, consistently.
+
+The improvement wasn't from writing faster code or optimizing algorithms. It was from realizing that the data I'd been collecting for months was better than what I was using, and routing my detection through it instead. The anti-cheat wasn't just a safety measure. It was the foundation that made the whole thing trustworthy.

@@ -1,0 +1,53 @@
+---
+title: "Starting Yokai Trials"
+date: "2024-12-15"
+description: "How a DanDaDan-inspired Roblox PvP game went from idea to first prototype."
+tags: ["yokai-trials", "roblox", "game-dev"]
+---
+
+If you scroll through the Roblox front page long enough, you start seeing the same three things: anime games, simulators, and tower defense. That's basically it. I wanted to build something, and out of those three, anime felt like the most interesting lane to work in.
+
+The question was which anime. I didn't want to pick something that already had ten games attached to it. I wanted a fanbase that was active but underserved. DanDaDan fit perfectly. Decent following, great aesthetic, and nobody had made a proper game for it yet. That gap was the opportunity.
+
+So me and a few friends sat down in December 2024 and started building Yokai Trials.
+
+The first few weeks were honestly overwhelming. Not the fun kind of overwhelming where you're so excited you can't sleep. The kind where you open Roblox Studio and stare at a blank baseplate and realize you have forty ideas and no idea which one to build first. Character system? Gacha mechanics? Combat? Map? UI? Every direction felt equally important and equally far away from being done.
+
+We scoped it down. Hard. Instead of trying to build the whole vision at once, we started with the absolute minimum: a basic arena, two characters, and simple punches. No abilities, no infusions, no gacha. Just two players hitting each other.
+
+The architecture decisions we made early ended up being the ones that mattered most. We went with Knit as the service framework, which gave us a clean way to organize server-side logic into services that the client could call into:
+
+```lua
+local CombatService = Knit.CreateService {
+    Name = "CombatService",
+    Client = {
+        ComboTimer = Knit.CreateSignal()
+    }
+}
+```
+
+For networking, we used BridgeNet2 instead of Roblox's default RemoteEvents. Faster, lighter, and gave us event-based communication without the overhead.
+
+The other thing I'm glad we did early was build a shared `CombatContext` module. Instead of passing a dozen references between every combat module, everything shares one context object:
+
+```lua
+local CombatContext = {
+    -- Services
+    UserInputService = UserInputService,
+    RunService = RunService,
+
+    -- State (mutable, shared across modules)
+    stunned = false,
+    blockState = false,
+    comboStep = nil,
+    attackDebounce = 0,
+
+    -- Signals for inter-module communication
+    hitboxSignal = Signal.new(),
+    comboExpireSignal = Signal.new(),
+}
+```
+
+Every module that came later (M1 combat, abilities, blocking, dashing, aerial combat) just received this context on `Init()` and had access to everything it needed. No prop drilling, no circular dependencies. One object, shared everywhere.
+
+Looking back, the most useful thing we did in those early weeks wasn't any specific piece of code. It was deciding what Yokai Trials *wasn't*. It's not an RPG. It's not an open world. It's not a simulator with a progression treadmill. It's a PvP game where you spin for characters and fight. Every time we were tempted to add something outside that scope, we had a clear answer: no. That boundary made every decision after it simpler.

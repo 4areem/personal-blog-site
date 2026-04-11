@@ -1,0 +1,156 @@
+---
+title: "Replicated Signals"
+date: "2025-08-14"
+description: "I modified Sleitnick's Signal library so signals could fire from server to client without manually wiring up remotes."
+tags: ["yokai-trials", "roblox", "networking", "signals"]
+---
+
+I was at a friend's place watching a movie when it hit me. Not a slow realization. More like a question that appeared mid-scene and refused to leave: *what if signals worked between server and client?*
+
+I sat there for the rest of the movie expressionless. My friends were watching. I was somewhere else entirely. A silent room in my head where the only thing that existed was this idea. By the time the credits rolled, I had the entire system designed. Not vaguely. I knew the functions, the data flow, the edge cases. I'd carved the whole thing out in my head while pretending to watch a movie.
+
+The backstory: Sleitnick's Signal library was already everywhere in my codebase. Signals are how modules talk to each other. When something happens, you fire a signal. Other modules listen. Clean, decoupled, simple. But they only work within one environment. A signal on the server can't reach the client. The moment anything needed to cross that boundary, I had to drop signals entirely and wire up a BridgeNet2 bridge instead. A completely different pattern for the same concept. Every time I needed the client to know about something the server did, I had to build dedicated networking for it. An exploding box? That's a bridge. A VFX trigger? Another bridge. A hit confirmation? Another bridge.
+
+By the end of that movie I was already on my laptop reading Sleitnick's source code. And when I read `Signal.new`, the lightbulb didn't just turn on. It exploded. The function creates a new signal every time. But what if we weren't *always* making a new signal? What if we could make use of old ones?
+
+Signals are Lua tables with metatables. They can't survive crossing the server/client boundary. When you send a signal to the client, it arrives dead. Just a table with some fields, no metatable, no methods. But the *data* inside the table survives. So what if every replicated signal carried identification data? A unique ID that the client could use to resurrect it on the other side?
+
+I got a working prototype in two days. Fully integrated into the combat system the next day.
+
+Here's how it works. On the server, when you create a signal and pass a player, it generates a GUID, opens a dynamic BridgeNet2 bridge with that ID, and tells the client about it:
+
+```lua
+function Signal.new<T...>(plr: Player?): Signal<T...>
+    local ID = HTTPService:GenerateGUID(false)
+    local self = setmetatable({
+        _handlerListHead = false,
+        _isReplicated = (isServer and plr ~= nil) and plr or nil,
+        _replicationId = (isServer and plr ~= nil) and ID or nil,
+        _proxyHandler = nil,
+        _yieldedThreads = nil,
+    }, Signal)
+
+    if isServer and plr ~= nil then
+        openReplicatedSignals[ID] = Bridge.ServerBridge(ID)
+        SignalBridge:Fire(plr, {guid=ID})
+    end
+
+    return self
+end
+```
+
+The `_replicationId` and `_isReplicated` fields are plain data. A string and a player reference. They survive serialization even when the metatable doesn't.
+
+On the client, `Signal.old()` takes the dead signal table and brings it back to life:
+
+```lua
+function Signal.old<T...>(signal): Signal<T...>
+    if isServer then return end
+
+    local repId = rawget(signal, "_replicationId")
+    local repPlr = rawget(signal, "_isReplicated")
+
+    return setmetatable({
+        _handlerListHead = false,
+        _isReplicated = repPlr,
+        _replicationId = repId,
+        _proxyHandler = nil,
+        _yieldedThreads = nil,
+    }, Signal)
+end
+```
+
+It reads the GUID from the corpse, creates a fresh signal with the same identity, and gives it back its metatable. The signal is alive again. But it's not connected to anything yet.
+
+The real trick is in `Connect`. When you connect a handler to a replicated signal on the client, it checks if the bridge was announced and lazily upgrades it from a placeholder to a live connection:
+
+```lua
+function Signal:Connect(fn)
+    local connection = setmetatable({
+        Connected = true,
+        _signal = self,
+        _fn = fn,
+        _next = false,
+    }, Connection)
+
+    if self._handlerListHead then
+        connection._next = self._handlerListHead
+    end
+    self._handlerListHead = connection
+
+    if not isServer then
+        local replicationId = rawget(self, "_replicationId")
+        if replicationId
+            and openReplicatedSignals[replicationId] == true then
+            openReplicatedSignals[replicationId] =
+                Bridge.ReferenceBridge(replicationId)
+
+            openReplicatedSignals[replicationId]._openConnection =
+                openReplicatedSignals[replicationId]
+                    :Connect(function(...)
+                        self:Fire(...)
+                    end)
+        end
+    end
+
+    return connection
+end
+```
+
+The `openReplicatedSignals` table starts as `true` when the client hears the announcement. When `Connect` sees `true`, it knows the bridge exists but isn't wired up. It creates the `ReferenceBridge`, connects, and from that point on, anything the server fires through that signal gets forwarded into the client's local `Fire()`.
+
+And `Fire()` itself does both: it fires locally for any server-side listeners, *and* pushes through the bridge to the client:
+
+```lua
+function Signal:Fire(...)
+    local item = self._handlerListHead
+
+    if isServer
+        and rawget(self, "_replicationId")
+        and openReplicatedSignals[self._replicationId] then
+        openReplicatedSignals[self._replicationId]
+            :Fire(self._isReplicated, ...)
+    end
+
+    while item do
+        if item.Connected then
+            if not freeRunnerThread then
+                freeRunnerThread =
+                    coroutine.create(runEventHandlerInFreeThread)
+            end
+            task.spawn(freeRunnerThread, item._fn, ...)
+        end
+        item = item._next
+    end
+end
+```
+
+One `:Fire()` call. Both sides execute. The server runs damage logic. The client runs VFX. No bridge management, no remote events, no extra wiring.
+
+I started passing signals through every attack in the combat system, regardless of whether the client actually needed them. If the signal exists and the client has a use for it, it hooks in. If not, nothing happens. The system is completely optional from the client's perspective. It just listens if it wants to.
+
+When the signal disconnects or the server is done with it, cleanup happens on both sides:
+
+```lua
+local function clearReplicatedSignals(plr, ID)
+    if openReplicatedSignals[ID] == nil then return end
+
+    if isServer then
+        openReplicatedSignals[ID] = nil
+        SignalBridge:Fire(plr, {guid=ID, kill=true})
+    else
+        task.wait()
+        if openReplicatedSignals[ID]
+            and openReplicatedSignals[ID]._openConnection then
+            openReplicatedSignals[ID]._openConnection:Disconnect()
+        end
+        openReplicatedSignals[ID] = nil
+    end
+end
+```
+
+No lingering connections. No leaked bridges. The signal lives, does its job, and dies cleanly.
+
+The whole thing took three days. Two for the prototype, one to wire it into the combat system. It started as a question I couldn't stop thinking about during a movie I can barely remember, and ended up changing how every system in the game communicates across the boundary. The rest of the codebase doesn't know the bridge layer exists. Server code creates a signal, fires it. Client code connects, listens. That's it.
+
+Sometimes the best ideas don't come from staring at code. They come from not being able to stop thinking about it, even when you're supposed to be doing something else.

@@ -1,0 +1,96 @@
+---
+title: "Adding Abilities Beyond M1s"
+date: "2025-09-05"
+description: "Extending the combat system from basic punches to full character movesets with E, R, and X abilities."
+tags: ["yokai-trials", "roblox", "combat", "game-dev"]
+---
+
+While I was building the M1 system, I was already thinking about abilities. Not designing them exactly, but noticing which parts of the M1 code were specific to punches and which parts were general combat logic. By the time M1s were working, I had a rough sense of what the ability framework would look like. It wasn't a separate planning phase. It grew out of the M1 code naturally.
+
+The first version of the ability system was literally a copy-paste of the M1 functions. Same sanity checks, same server communication pattern, same animation playback. I just stripped out the combo logic (abilities don't combo) and added cooldown tracking (M1s don't have cooldowns). The refactoring happened as I went, not upfront:
+
+```lua
+function Abilities:Use(slot)
+    if not self:SanityChecks() then return end
+    if self:IsCooldown(ctx.animationIds["Abilities"][slot].Name) then
+        return false
+    end
+
+    ctx.fightingData.isAttacking = true
+    ctx.animTable = ctx.animationIds["Abilities"][slot]
+
+    local animTrack = ctx.preloadedAnimations[ctx.animTable.Animation]
+    animTrack.Looped = false
+    animTrack:Play()
+
+    local now = workspace:GetServerTimeNow()
+    ctx.hitboxDeadline = now + (ctx.animTable.Duration or 3)
+
+    local result, completed =
+        ctx.CombatService:SendAbilityAttack(slot):await()
+end
+```
+
+Same pattern as M1: play animation immediately on the client, send to server, wait for confirmation. The difference is the slot-based lookup into `ctx.animationIds["Abilities"]` and the cooldown check at the top.
+
+The first ability I built was Mantis's Jet Punch. Simple as it gets. One hitbox, one animation, VFX on impact, sound on swing. But seeing it work was a milestone. It meant the framework actually worked. A character had a real moveset now, not just punches.
+
+One thing I built into the system early was startup validation. Every character has abilities defined in `ClassAnimations` with animation IDs and names. Every ability needs a matching function in `AbilityFunctions`. If you define an animation for an ability but forget to write the function, the game tells you immediately on load:
+
+```lua
+for _, Class in pairs(tableOfAnimations) do
+    for _, Ability in pairs(Class) do
+        if not AbilityFunctions[Ability.Name] then
+            error(`Ability {Ability.Name} does not exist
+                in Abilities Client module script`)
+        end
+    end
+end
+```
+
+This saved me multiple times. I'd add a new ability to the animation table, forget to write the client function, and the error would catch it before I ever loaded into a test. Without it, the ability would silently do nothing and I'd spend ten minutes figuring out why.
+
+The ability behavior itself is dispatched by name. The combat system doesn't know what any ability does. It just calls the function:
+
+```lua
+task.spawn(function()
+    ctx.AbilityFunctions[abilityInfo.Name](
+        ctx.player, animTrack, impactSignal
+    )
+end)
+```
+
+Each ability function receives the player, the animation track, and an impact signal. What it does with them is its own business. Mantis's Jet Punch spawns a hitbox in front of the player. Another ability might launch a projectile. Another might be a grab. The framework doesn't care. It just provides the context and gets out of the way.
+
+On the server side, the HitboxManager supports different hitbox behaviors depending on what the ability needs:
+
+```lua
+local hitboxMethods = {
+    Base = { ... },     -- Follows root, standard melee
+    Root = { ... },     -- Velocity-smoothed, ping-compensated
+    Forward = { ... },  -- Projectile-style, travels forward
+    Follow = { ... },   -- Locks to a target part
+    Static = { ... },   -- Stays at spawn position
+}
+```
+
+A dash attack uses `Forward`. A grab uses `Follow`. A ground slam uses `Static`. The ability just tells the server which method to use and the hitbox system handles the rest.
+
+The gacha tie-in is where it all clicks together. Each character in Yokai Trials is just a table of animation IDs and ability definitions. Swapping characters swaps the table. The combat system doesn't know or care which character you're playing:
+
+```lua
+function CombatContext:LoadAnimations()
+    local playerDataClass = self.playerData().Class
+    local currentClass =
+        playerDataClass.unlockedClasses[playerDataClass.currentClass]
+
+    self.animationIds = table.clone(self.ClassAnimations[currentClass])
+    if next(self.animationIds) == nil then
+        self.animationIds = table.clone(self.ClassAnimations.Default)
+    end
+end
+```
+
+Adding a new character to the game means writing a `ClassAnimations` entry and the matching `AbilityFunctions`. No changes to the combat system, no changes to the hitbox system, no changes to networking. The framework handles it. What would have been days of work became an afternoon of writing definitions and functions.
+
+That payoff was the whole point of building the M1 system the way I did. The hard part was getting the foundation right. Abilities were the proof that the foundation worked.

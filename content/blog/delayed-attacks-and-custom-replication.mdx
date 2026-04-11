@@ -1,0 +1,113 @@
+---
+title: "Delayed Attacks and Custom Replication"
+date: "2025-07-18"
+description: "When Roblox's built-in replication wasn't fast enough, I had to integrate a custom system and build an anti-cheat on top of it."
+tags: ["yokai-trials", "roblox", "networking", "replication"]
+---
+
+It wasn't one moment where I realized something was wrong. It was weeks of the same feeling. I'd throw a punch, it would connect on my screen, and the server would say no. Not every time, but often enough that it gnawed at me. The M1 system was working. The prediction was smooth. But the underlying position data was stale, and no amount of clever client code could fix that.
+
+Roblox's built-in replication updates character positions at whatever rate the engine decides. For most games that's fine. For a melee fighting game where two players are standing three studs apart and milliseconds matter, it's not. My client would show the opponent right in front of me. The server's version of the world had them five studs to the left. The punch lands locally, misses on the server. The player sees a hit, feels nothing happen. That's the worst feeling in a fighting game.
+
+I spent a while trying to work around it. Generous hit windows. Tolerance thresholds. Bigger hitboxes. None of it felt right because the core data was the problem, not the detection logic. I was building increasingly complicated workarounds for bad input.
+
+Then I found BetterReplication on the DevForum.
+
+BetterReplication is a custom position replication system. Instead of relying on Roblox's internal pipeline, clients send their position data directly to the server via binary buffers at a fixed tick rate. The server collects it and redistributes it to nearby players. Simple concept, but it meant I could control the update frequency and the data format:
+
+```lua
+local Config = {
+    proximityThreshold = 100,
+    makeRagdollFriendly = true,
+    optimizeInactivity = true,
+    tickRate = 1/20,           -- 20Hz updates
+    interpolationDelay = 1/10
+}
+```
+
+20Hz. Every 50 milliseconds, every player's position gets sent to the server and forwarded to everyone nearby. The server maintains a `positionTable` that any system can query for the latest known position of any player:
+
+```lua
+FromClient.OnServerEvent:Connect(function(player, b: buffer)
+    local data = readFromClient(b)
+
+    positionTable[player] = data.c
+
+    local outOfProximity = currentlyOutOfProximity[player]
+    for _, receiver in Players:GetPlayers() do
+        if receiver == player
+            or table.find(outOfProximity, receiver) then
+            continue
+        end
+        ToClient:FireClient(receiver,
+            writeToClient(data.t, identifiers[player], data.c))
+    end
+end)
+```
+
+Players beyond 100 studs don't receive each other's updates. A proximity clock handles that automatically. No wasted bandwidth on players who aren't near each other.
+
+But here's the thing about BetterReplication: it has zero anti-cheat. It literally just takes whatever position the client sends and passes it along. A speed hacker could say they're at any position and the system would believe them. So before I could use any of this data for hit detection, I had to validate it.
+
+I built a SanityChecker that hooks into BetterReplication's sanity callback. Every position packet gets checked before it's accepted:
+
+```lua
+br.bindSanityCheck(function(data, player: Player)
+    local uid = tostring(player.UserId)
+    local currentPos = data.c.Position
+    local serverPos = rootPart.Position
+    local metrics = _G.sanityMetrics[uid]
+
+    -- Get player ping (clamped to reasonable values)
+    local ping = math.clamp(player:GetNetworkPing() * 1000, 40, 1000)
+
+    -- Calculate velocity from last position
+    local timeDelta = data.t - metrics.lastUpdateTime
+    local positionDelta = (currentPos - metrics.lastPosition.Position).Magnitude
+
+    if positionDelta < 500 then
+        velocity = positionDelta / timeDelta
+    else
+        -- Teleport detected, reset and allow
+        return true
+    end
+
+    -- Check velocity limit
+    local maxVelocity = Config.getAllowedVelocity(ping)
+    if velocity > maxVelocity then
+        _G.lastPositions[uid] = character.HumanoidRootPart.CFrame
+        return false
+    end
+
+    -- Check deviation limit
+    local isValid = Config.isDeviationValid(deviation, velocity, ping)
+    if not isValid then
+        _G.lastPositions[uid] = character.HumanoidRootPart.CFrame
+        return false
+    end
+
+    _G.lastPositions[uid] = data.c
+    return true
+end)
+```
+
+The validation is layered. First, velocity: if you moved faster than physically possible, the packet gets rejected. The velocity limit scales with ping because higher ping means larger gaps between updates, which naturally inflates the calculated velocity. Second, deviation: how far is the client's claimed position from where Roblox's own replication thinks they are? That tolerance also scales with ping, and adjusts based on how fast you're moving:
+
+```lua
+Config.velocityBuckets = {
+    {min = 0, max = 20, deviationMultiplier = 0.85},   -- Walking: stricter
+    {min = 20, max = 50, deviationMultiplier = 1.0},    -- Running: normal
+    {min = 50, max = 100, deviationMultiplier = 1.2},   -- Sprint: relaxed
+    {min = 100, max = math.huge, deviationMultiplier = 1.5}, -- Abilities: very relaxed
+}
+```
+
+Walking? You better be close to where Roblox says you are. Sprinting or using a dash ability? More tolerance. Standing completely still with velocity under 1? Maximum 1 stud deviation, period.
+
+There's also a 5-second grace period after spawning where no validation runs. Characters spawn in weird states sometimes, and rejecting packets during that window caused players to rubber-band on respawn.
+
+When a packet fails validation, the system doesn't kick anyone. It just rejects the packet and falls back to Roblox's default position. Graceful degradation. The player's custom replication data gets replaced with the engine's data until the next valid packet comes through. They might feel a tiny hitch, but they don't get disconnected for having bad internet.
+
+The `_G.lastPositions` table became the single source of truth for where every player is. Every system in the game, from hitboxes to abilities to the combat service, reads from this table instead of checking `HumanoidRootPart.Position` directly. That one change made everything downstream more accurate, because the data feeding it was better.
+
+Integrating BetterReplication took about a week. Building the anti-cheat on top of it took another two. The frustration of delayed attacks was gone. But I didn't realize yet how much more this system could do. That came later, when I started using the same position data for hitbox detection.

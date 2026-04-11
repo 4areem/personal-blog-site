@@ -1,0 +1,18 @@
+---
+name: "StubHub Monitor"
+description: "A Discord bot that scrapes StubHub event pages for real-time ticket inventory and logs sales trends to Google Sheets."
+tech: ["Python", "Playwright", "Google Sheets API", "Discord.py"]
+featured: true
+---
+
+## Why I Built This
+
+I needed real-time visibility into ticket sales for specific events. StubHub doesn't expose this data through an API, and manually checking pages was tedious. I wanted automated tracking with trend analysis so I could see how inventory was moving over time.
+
+## How I Built This
+
+There are two variations of the tool:
+
+**Local version** runs on your PC. You trigger a scrape via Discord slash commands, Playwright launches a headless Chromium browser, navigates to the event pages, extracts the ticket metrics (viewed count, sold this hour/day), and returns the results directly in Discord. Simple and immediate.
+
+**Server version** runs on an Ubuntu server as a systemd service. Instead of manual triggers, users configure schedules and recurring events. The bot automatically scrapes at the set intervals, logs timestamped rows to Google Sheets with trend calculations (percentage changes between scrapes), and creates a new tab per artist dynamically. It processes events in parallel with asyncio for speed.

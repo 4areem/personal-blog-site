@@ -1,0 +1,16 @@
+---
+name: "TM Auth Research"
+description: "Security research tool exploring MFA flow vulnerabilities and browser fingerprinting on a major ticketing platform."
+tech: ["Python", "Playwright", "CockroachDB", "SQLAlchemy"]
+featured: true
+---
+
+## Why I Built This
+
+I was interested in understanding how large platforms implement multi-factor authentication flows and where the weak points are. Ticketing platforms are high-value targets, and I wanted to explore the attack surface from a research perspective.
+
+## How I Built This
+
+The tool uses Playwright for browser automation, simulating real user interactions with the platform's authentication flow. Jobs are managed through a queue stored in CockroachDB (PostgreSQL-compatible), with SQLAlchemy handling the ORM layer. The system integrates with external SMS APIs for MFA verification and IMAP for email code extraction. Proxy support (HTTP/HTTPS/SOCKS4/5) and fake-useragent handle fingerprint diversity.
+
+The architecture is a daemon that polls for pending jobs and executes them asynchronously, logging results back to the database.

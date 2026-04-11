@@ -1,0 +1,58 @@
+---
+title: "Stop Making the AI Edit Inside Roblox"
+date: "2026-04-11"
+description: "I forked a Roblox Studio MCP server, ripped out the line-based editing tools, and replaced them with something that actually works."
+tags: ["roblox", "mcp", "tooling", "dev-tools"]
+---
+
+I've been using CLI coding agents to speed up my Roblox workflow for a while now. The loop is simple: describe what I want, the AI writes the code, I review and iterate. It's faster than writing everything by hand, especially for boilerplate-heavy systems. When I came across [robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp), an MCP server that connects AI assistants directly to Roblox Studio, it felt like the missing piece. Read scripts, create objects, edit code, all without leaving the terminal.
+
+I used it for a couple months. It worked. The editing tools operated by line number: `edit_script_lines`, `insert_script_lines`, `delete_script_lines`. Tell the AI "replace lines 47 through 52 with this code" and it would do it. For small scripts, it was fine. For anything over a few hundred lines, it started falling apart.
+
+AIs are terrible at counting lines.
+
+They'd overshoot ranges, overwrite code that wasn't supposed to be touched, and corrupt scripts. The bigger the script, the worse it got. A 200-line module was manageable. A 1,500-line combat system was a coin flip. A 3,000-line hitbox manager was guaranteed destruction.
+
+My first fix was adding line numbers to the output. When the AI reads a script, every line comes back prefixed with its number, so at least it can *see* what it's looking at. That helped a little. The AI was less likely to be wildly off. But it still miscounted. Still overwrote wrong ranges. The error rate went from "constant" to "frequent," which isn't the same as "solved."
+
+So I built a linter directly into the plugin. After every edit, the server would parse the script and check for unbalanced `end` statements, mismatched brackets, unclosed strings. If the edit broke something obvious, it would reject it and tell the AI what went wrong.
+
+It sucked. It was a band-aid on a fundamentally broken approach. The AI would make an edit, the linter would reject it, the AI would try to fix the rejection, introduce a new error, the linter would catch that, and the whole thing would spiral. I was building guardrails for a car that was driving off a cliff.
+
+Then I tried using the MCP with OpenAI's Codex.
+
+That's when I lost my mind.
+
+What was weird is that Claude Opus was actually decent at this. Not perfect, but workable. It would get the line numbers right maybe 80% of the time, and when it didn't, the errors were small enough to fix. Codex was a different story. It was breaking scripts every other edit. I'd fix something, Codex would corrupt something else. Fix that, something else breaks. I was building a tower and Codex was tearing it down every two minutes. Over and over. I went berserk.
+
+After that meltdown, I stepped back. The problem wasn't the AI's counting ability. The problem was that I was asking it to count at all. AI CLI tools like Claude Code already know how to edit files. They don't use line numbers. They match on actual code strings: "find this exact block of code, replace it with this." No counting, no off-by-one errors. The Edit tool in Claude Code hasn't corrupted a file on me once. So why was I forcing the AI to use a worse editing method just because the code lived in Roblox Studio?
+
+The answer was obvious once I saw it: pull the script out of Studio, let the AI edit it locally the way it already knows how, then push it back.
+
+I forked the repo at v1.7.2 and built three new MCP tools: `load_script`, `push_script`, and `list_loaded_scripts`. The flow is dead simple:
+
+```
+load_script  -->  AI edits .luau file natively  -->  push_script
+```
+
+`load_script` pulls a script from Studio and writes it to a local `.luau` file. The AI edits it using its built-in file tools: Read, Edit, Write. The same tools it uses for every other file on your machine. Then `push_script` sends the edited source back to Studio.
+
+Scripts are organized locally in `.roblox-scripts/<gameId>/<ServiceName>/ScriptName.luau` with an `index.json` that tracks metadata for every loaded script. The index persists across sessions. A brand new conversation can call `list_loaded_scripts`, see what's already loaded, and pick up right where the last one left off. No re-loading, no "what was the path again?"
+
+I spent an entire day on edge cases. Not building, just planning. Going back and forth on every scenario:
+
+What if someone moves the script in Studio while you're editing locally? I built a 3-hash validation system. An **identity hash** (name + path + className) verifies this is the same script at the same location. Hard fail if it doesn't match, no bypass, ever. A **source hash** (the script content at load time) detects if someone edited the script in Studio since you loaded it. Rejects by default. There's a force flag but it exists to be discouraged. A **recovery hash** (name + className) handles the case where a script was moved or renamed. The server scans Studio for scripts matching the same name and type, compares source hashes to confirm identity, and suggests the new path if it finds a match.
+
+What if the script gets deleted from Studio? The local file gets moved to an `orphaned/` folder. Code is never lost.
+
+What about multiple games? Scripts are separated by `gameId` so different places never collide.
+
+What about scripts that are 50,000+ characters? The original plugin was truncating large scripts to 1,000 lines. I added a `fullSource` flag so `load_script` always gets the complete source. No more partial reads.
+
+One thing that would've made all of this simpler: Roblox's `Instance.UniqueId` property. Every instance in Studio has a unique identifier that persists across sessions. It would've been perfect for tracking script identity without composite hashes. But it requires `RobloxScriptSecurity` and Roblox has confirmed they won't expose it to plugin developers. So the hash system it is.
+
+I tested on a 3,000+ line script. Loaded it, edited it, pushed it back to Studio. Under 20 seconds. The AI had full context of the entire script without needing multiple `get_script_source` round trips. No line counting errors. No corrupted scripts. No re-reading the source to verify what went wrong. No linter band-aids.
+
+I ripped out `edit_script_lines`, `insert_script_lines`, `delete_script_lines`, `validate_script_syntax`, and the entire built-in linter. All of it. The new system makes every single one of them unnecessary.
+
+The fork lives at [github.com/4areem/robloxstudio-mcp](https://github.com/4areem/robloxstudio-mcp).
