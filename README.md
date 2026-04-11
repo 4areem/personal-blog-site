@@ -1,36 +1,48 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# kareemdev
 
-## Getting Started
+Personal developer blog and portfolio. Built with Next.js 16, Tailwind CSS v4, and MDX.
 
-First, run the development server:
+**Live at [kareemdev.co](https://kareemdev.co)**
+
+## Stack
+
+- **Framework**: Next.js 16 (App Router)
+- **Styling**: Tailwind CSS v4
+- **Content**: MDX with gray-matter frontmatter
+- **Syntax Highlighting**: Shiki (github-dark theme)
+- **Fonts**: Geist + Geist Mono
+- **Deploy**: Vercel (auto-deploys on push to main)
+
+## Local Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Adding Content
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+**Blog posts**: Add `.mdx` files to `content/blog/`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```yaml
+---
+title: "Post Title"
+date: "2025-01-01"
+description: "Short description for cards and meta tags."
+tags: ["tag1", "tag2"]
+---
+```
 
-## Learn More
+**Projects**: Add `.mdx` files to `content/projects/`
 
-To learn more about Next.js, take a look at the following resources:
+```yaml
+---
+name: "Project Name"
+description: "One-liner description."
+tech: ["Tech1", "Tech2"]
+url: "https://example.com"
+featured: true
+---
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+**Images**: Drop into `public/blog/` or `public/projects/`, reference with `![alt](/blog/image.png)`
