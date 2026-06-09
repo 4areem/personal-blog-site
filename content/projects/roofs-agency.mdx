@@ -1,0 +1,30 @@
+---
+name: "Roofs Agency"
+description: "A production lead-generation platform for Florida re-roof sales teams. Turns millions of public property and permit records into scored, route-clustered door-knock leads."
+tech: ["Python", "TypeScript", "Next.js", "DuckDB", "Playwright", "Docker", "Linux"]
+url: "https://roofs.agency"
+main: true
+---
+
+## What It Is
+
+Roofs Agency is a re-roof lead-generation platform I built and run end to end — live in production and used daily by door-to-door sales teams. It ingests public property and permit data across Florida counties, scores and tier-ranks which homes are most likely due for a re-roof, and clusters them into efficient canvassing routes.
+
+## The Numbers
+
+- **2.9M+** county permit records captured
+- **246k** identified as re-roofs
+- **515k** scored, tier-ranked leads
+- Multiple Florida counties, and growing
+
+## How I Built It
+
+The backend is a Python data pipeline — pandas and PyArrow over a DuckDB permit store — that joins statewide property records (DOR NAL data and parcel shapefiles) with per-county permit sources, some loaded in bulk, others scraped with Playwright through a rotating proxy pool. A scoring stage ranks candidates into tiers, and a k-means clustering stage groups them into geographically tight routes so canvassers spend less time driving and more time knocking.
+
+The frontend is a Next.js 16 admin and canvasser app: lead browsing and filtering, phone-number trust scoring, and PDF/CSV export for field teams.
+
+## Infrastructure
+
+I own the whole deployment. It runs on a self-managed Ubuntu VPS with systemd services behind nginx, blue/green zero-downtime deploys, Cloudflare in front (Full-Strict TLS, origin IP hidden), and GitHub Actions CI/CD that auto-deploys on every push to main.
+
+*Private / gated platform — a walkthrough is available on request.*

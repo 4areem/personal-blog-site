@@ -13,12 +13,10 @@ export default function Footer() {
             github
           </a>
           <a
-            href="https://linkedin.com/in/kareem"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="mailto:kareemishahwan@gmail.com"
             className="hover:text-foreground transition-colors"
           >
-            linkedin
+            email
           </a>
         </div>
       </div>

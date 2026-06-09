@@ -11,17 +11,19 @@ export default function About() {
 
       <div className="prose">
         <p>
-          Hi, I&apos;m Kareem — a software engineer who likes building things
-          that are fast, simple, and useful.
+          Hi, I&apos;m Kareem — a self-taught software engineer from Florida. I
+          build and ship production systems end to end, from data pipelines and
+          web scrapers to full-stack apps and the infrastructure they run on.
         </p>
         <p>
-          I write about software engineering, systems design, and the tools I
-          use day to day. This site is where I share what I&apos;m learning
-          and working on.
+          I run Shahwan Systems LLC, my independent software studio, where
+          I&apos;ve built things like roofs.agency — a lead platform that turns
+          millions of public records into scored, route-clustered leads — and
+          SkidBase, a data-breach search engine.
         </p>
         <p>
-          When I&apos;m not coding, you can find me exploring new technologies
-          or contributing to open source.
+          I write here about the systems I build, the problems I run into, and
+          what I&apos;m learning along the way.
         </p>
       </div>
 
@@ -35,15 +37,7 @@ export default function About() {
           GitHub ↗
         </a>
         <a
-          href="https://linkedin.com/in/kareem"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-muted hover:text-foreground transition-colors"
-        >
-          LinkedIn ↗
-        </a>
-        <a
-          href="mailto:kareem@example.com"
+          href="mailto:kareemishahwan@gmail.com"
           className="text-muted hover:text-foreground transition-colors"
         >
           Email ↗

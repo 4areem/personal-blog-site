@@ -13,9 +13,10 @@ export default function Home() {
   return (
     <div className="mx-auto max-w-3xl px-6 py-16">
       <section className="mb-16">
-        <h1 className="text-3xl font-semibold tracking-tight">Kareem</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Kareem Shahwan</h1>
         <p className="mt-3 text-lg text-muted">
-          Software engineer. Building things for the web.
+          Software engineer. I build and ship production systems — data
+          pipelines, scrapers, and the infrastructure behind them.
         </p>
       </section>
 
